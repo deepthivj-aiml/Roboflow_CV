@@ -161,6 +161,144 @@ def csv_bytes(rows):
     return output.getvalue().encode("utf-8")
 
 
+def landmark_angle(first, vertex, last):
+    first_vector = first - vertex
+    last_vector = last - vertex
+    denominator = float((first_vector**2).sum() ** 0.5 * (last_vector**2).sum() ** 0.5)
+    if denominator < 1e-6:
+        return None
+    cosine = max(-1.0, min(1.0, float((first_vector * last_vector).sum()) / denominator))
+    return float(__import__("math").degrees(__import__("math").acos(cosine)))
+
+
+def inspect_pose(points, confidence):
+    required = [5, 6, 11, 12, 13, 14, 15, 16]
+    if confidence is None or any(float(confidence[index]) < 0.3 for index in required):
+        return None, {}, "Move back so your shoulders, hips, knees, and ankles are visible."
+
+    left_knee = landmark_angle(points[11], points[13], points[15])
+    right_knee = landmark_angle(points[12], points[14], points[16])
+    hip_width = float(((points[11] - points[12]) ** 2).sum() ** 0.5)
+    ankle_width = float(((points[15] - points[16]) ** 2).sum() ** 0.5)
+    knee_width = float(((points[13] - points[14]) ** 2).sum() ** 0.5)
+    expected_knee_width = (hip_width + ankle_width) / 2
+    shoulder_center = (points[5] + points[6]) / 2
+    hip_center = (points[11] + points[12]) / 2
+    torso_lean = float(__import__("math").degrees(__import__("math").atan2(
+        abs(float(shoulder_center[0] - hip_center[0])),
+        max(abs(float(shoulder_center[1] - hip_center[1])), 1e-6),
+    )))
+
+    issues = []
+    knee_ratio = knee_width / expected_knee_width if expected_knee_width > 1 else 1.0
+    if knee_ratio < 0.62:
+        issues.append("Knees may be moving inward")
+    if left_knee is not None and right_knee is not None and abs(left_knee - right_knee) > 30:
+        issues.append("Knee bend differs side to side")
+    if torso_lean > 50:
+        issues.append("Substantial torso lean")
+
+    metrics = {
+        "knee_width_ratio": round(knee_ratio, 2),
+        "left_knee_angle": round(left_knee, 1) if left_knee is not None else None,
+        "right_knee_angle": round(right_knee, 1) if right_knee is not None else None,
+        "torso_lean_degrees": round(torso_lean, 1),
+    }
+    return issues, metrics, None
+
+
+@st.cache_resource(show_spinner="Loading the pose model...")
+def load_pose_detector():
+    import threading
+    from ultralytics import YOLO
+
+    return YOLO("yolo11n-pose.pt"), threading.Lock()
+
+
+def render_webcam():
+    import time
+    import cv2
+    from streamlit_webrtc import VideoProcessorBase, WebRtcMode, webrtc_streamer
+
+    st.markdown("#### Live pose check")
+    st.caption("Possible issue cues use simple 2D landmark thresholds. Use a front-facing view for knee alignment; results are not coaching or medical advice.")
+    try:
+        pose_model, model_lock = load_pose_detector()
+    except Exception as error:
+        st.error(f"Could not load the pose model: {error}")
+        return
+
+    class PoseProcessor(VideoProcessorBase):
+        def __init__(self):
+            self.latest = None
+            self.latest_lock = __import__("threading").Lock()
+
+        def recv(self, frame):
+            image = frame.to_ndarray(format="bgr24")
+            with model_lock:
+                result = pose_model.predict(image, verbose=False, imgsz=480, conf=0.35)[0]
+            annotated = result.plot()
+            issues = None
+            metrics = {}
+            message = "No person pose detected. Keep your full body in view."
+
+            if result.keypoints is not None and len(result.keypoints.xy):
+                person_index = int(result.boxes.conf.argmax().item()) if result.boxes is not None and len(result.boxes) else 0
+                points = result.keypoints.xy[person_index].cpu().numpy()
+                confidence = result.keypoints.conf[person_index].cpu().numpy() if result.keypoints.conf is not None else None
+                issues, metrics, message = inspect_pose(points, confidence)
+                if issues is not None:
+                    message = "Possible issues: " + ", ".join(issues) if issues else "No configured issue cue detected"
+
+            if issues is None:
+                banner = message
+                color = (30, 145, 205)
+            elif issues:
+                banner = "Possible: " + ", ".join(issues)
+                color = (45, 65, 210)
+            else:
+                banner = "No configured issue cue detected"
+                color = (60, 145, 40)
+
+            cv2.rectangle(annotated, (0, 0), (annotated.shape[1], 42), (24, 33, 31), -1)
+            cv2.putText(annotated, banner[:90], (14, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2, cv2.LINE_AA)
+            with self.latest_lock:
+                self.latest = {"issues": issues, "metrics": metrics, "message": message}
+            return av.VideoFrame.from_ndarray(annotated, format="bgr24")
+
+        def snapshot(self):
+            with self.latest_lock:
+                return dict(self.latest) if self.latest else None
+
+    import av
+
+    context = webrtc_streamer(
+        key="form-check-webcam",
+        mode=WebRtcMode.SENDRECV,
+        video_processor_factory=PoseProcessor,
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True,
+    )
+    status = st.empty()
+    while context.state.playing:
+        processor = context.video_processor
+        snapshot = processor.snapshot() if processor else None
+        if snapshot:
+            if snapshot["issues"] is None:
+                status.info(snapshot["message"])
+            elif snapshot["issues"]:
+                status.error(snapshot["message"])
+            else:
+                status.success(snapshot["message"])
+            if snapshot["metrics"]:
+                columns = status.container().columns(4)
+                for column, (label, value) in zip(columns, snapshot["metrics"].items()):
+                    column.metric(label.replace("_", " ").title(), value)
+        time.sleep(0.2)
+    if not context.state.playing:
+        status.info("Start the camera above to see live pose landmarks and issue cues.")
+
+
 with st.sidebar:
     st.markdown("### Model connection")
     api_key = st.text_input("Roboflow API key", value=os.getenv("ROBOFLOW_API_KEY", ""), type="password", help="Your key is sent only to Roboflow's inference endpoint.")
@@ -175,7 +313,7 @@ st.markdown('<p class="kicker">Roboflow vision prototype / 01</p>', unsafe_allow
 st.title("Form Check")
 st.markdown('<p class="lede">Review an exercise image or video against your trained form-detection model. Results are model signals, not medical or coaching advice.</p>', unsafe_allow_html=True)
 
-media_type = st.radio("Media", ["Image", "Video"], horizontal=True, label_visibility="collapsed")
+media_type = st.radio("Input", ["Image", "Video", "Webcam"], horizontal=True, label_visibility="collapsed")
 correct_labels = normalized_labels(correct_text)
 incorrect_labels = normalized_labels(incorrect_text)
 
@@ -194,14 +332,14 @@ if media_type == "Image":
                     verdict, signal, score, matches = classify(predictions, confidence_threshold, correct_labels, incorrect_labels)
                     st.markdown(f'<div class="verdict">{verdict}</div>', unsafe_allow_html=True)
                     st.metric("Strongest signal", signal, f"{score:.0%} confidence")
-                    st.image(render_predictions(image, matches), caption="Detected regions")
+                    st.image(render_predictions(image, matches, incorrect_labels), caption="Detected regions")
                     if verdict == "Unclear":
                         st.info("No configured correct- or incorrect-form class cleared the confidence threshold.")
                 except (requests.RequestException, ValueError, RuntimeError) as error:
                     st.error(str(error))
             elif not api_key or not model_id:
                 st.info("Add your Roboflow API key and deployed model ID in the sidebar to run inference.")
-else:
+elif media_type == "Video":
     uploaded = st.file_uploader("Choose a workout video", type=["mp4", "mov", "avi", "m4v"])
     sample_seconds = st.slider("Seconds between sampled frames", min_value=0.5, max_value=5.0, value=1.0, step=0.5)
     frame_limit = st.slider("Maximum frames to analyze", min_value=5, max_value=MAX_VIDEO_FRAMES, value=30, step=5)
@@ -230,3 +368,5 @@ else:
                 st.error(str(error))
     elif not api_key or not model_id:
         st.info("Add your Roboflow API key and deployed model ID in the sidebar to run inference.")
+else:
+    render_webcam()

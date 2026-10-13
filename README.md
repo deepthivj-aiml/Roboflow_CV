@@ -4,6 +4,8 @@ A small Streamlit computer-vision app that sends an exercise image or sampled vi
 
 This is an inference app, not a pre-trained fitness coach. You need to train and deploy a model on examples of the exercise and form labels you care about. A single-frame detector cannot assess movement quality across a full repetition.
 
+For a local pose-estimation and webcam prototype trained from open exercise skeleton data, see [workout_form_live.ipynb](workout_form_live.ipynb). It uses UI-PRMD and requires the labeled dataset archive to be downloaded separately; it refuses to train when explicit correct/incorrect labels are unavailable.
+
 ## Run locally
 
 Use Python 3.10–3.14.
