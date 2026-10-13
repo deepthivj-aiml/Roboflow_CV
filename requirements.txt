@@ -2,5 +2,7 @@ streamlit>=1.41,<2
 requests>=2.32,<3
 Pillow>=10,<13
 opencv-python-headless>=4.10,<5
+streamlit-webrtc>=0.63,<1
+ultralytics>=8.3,<9
 streamlit-webrtc>=0.47,<1
 ultralytics>=8.3,<9

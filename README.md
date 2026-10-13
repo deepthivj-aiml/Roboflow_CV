@@ -1,14 +1,22 @@
 # Form Check
 
-A small Streamlit computer-vision app that sends an exercise image or sampled video frames to a deployed Roboflow object-detection model. It marks configured detections as **Looks correct**, **Needs attention**, or **Unclear** and shows the detected regions and confidence scores.
+Form Check is a Streamlit prototype for reviewing exercise form from images, uploaded clips, or a live webcam. It has two inference paths: uploaded images and videos use your deployed Roboflow object-detection model; webcam mode estimates body pose locally with Ultralytics YOLO pose and flags a few configurable geometric cues.
 
-This is an inference app, not a pre-trained fitness coach. You need to train and deploy a model on examples of the exercise and form labels you care about. A single-frame detector cannot assess movement quality across a full repetition.
+This repository does not include training photographs or a pretrained form-quality model. Collect and label your own exercise images in Roboflow before using the hosted image/video assessment. The webcam cues are heuristics, not a trained form classifier or a guarantee of correct technique.
 
-For a local pose-estimation and webcam prototype trained from open exercise skeleton data, see [workout_form_live.ipynb](workout_form_live.ipynb). It uses UI-PRMD and requires the labeled dataset archive to be downloaded separately; it refuses to train when explicit correct/incorrect labels are unavailable.
+## App modes
+
+| Input | What it does | Processing |
+| --- | --- | --- |
+| Image | Sends one image to your Roboflow model; displays class, confidence, and predicted boxes. | Image is sent to Roboflow's hosted inference endpoint. |
+| Video | Samples frames at the selected interval, summarizes frame verdicts, and offers a CSV download. | Each sampled frame is sent to Roboflow. The app caps an upload at 80 inference requests. |
+| Webcam | Streams annotated pose landmarks and possible issue cues: knees moving inward, uneven knee bend, or substantial torso lean. | YOLO pose runs on the Streamlit server using the browser's WebRTC camera stream; it does not call Roboflow. |
+
+Webcam checks need a mostly full-body view. Knee alignment is best viewed from the front; torso lean is estimated in 2D and is sensitive to camera angle. The app shows possible issue cues, not medical or coaching advice.
 
 ## Run locally
 
-Use Python 3.10–3.14.
+Use Python 3.10–3.14. The first webcam run downloads the YOLO pose weights and may take longer while the model initializes.
 
 ```bash
 python -m venv .venv
@@ -17,17 +25,38 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-In the app sidebar, enter your Roboflow API key and deployed model ID in `workspace/project/version` format. The key can instead be supplied through `ROBOFLOW_API_KEY`; `ROBOFLOW_MODEL_ID` can supply the model ID. The sidebar fields take precedence when changed. Keep keys private and do not commit them.
+For **Image** and **Video**, enter a Roboflow API key and deployed model ID in `workspace/project/version` format in the sidebar. Alternatively, set `ROBOFLOW_API_KEY` and `ROBOFLOW_MODEL_ID` before starting the app. Keep API keys private and never commit them.
 
-## Prepare a Roboflow model
+For **Webcam**, allow camera access in the browser. WebRTC requires a secure context (HTTPS or localhost) and working network access between the browser and Streamlit server. Remote containers may need port forwarding and an HTTPS tunnel; the camera is the browser device, while pose inference runs on the app server.
 
-1. Create a Roboflow object-detection project and upload representative images of the exercise, including different body types, camera angles, lighting, and both correct and incorrect examples.
-2. Annotate the relevant form cues consistently. You can use class names such as `correct_form` and `incorrect_form`, or label specific issues such as `knees_caving` and `back_rounding`.
-3. Split training and validation examples by person or recording session where possible, so near-identical frames do not leak across splits. Train a model and deploy a version.
-4. Copy the deployed model ID into the sidebar. In **Class mapping**, set comma-separated class names exactly to your model's labels. Classes that indicate an issue should go in **Needs-attention classes**; accepted-form classes go in **Correct-form classes**. Issue classes take precedence if both types are detected in a frame.
+## Training images for Roboflow
 
-The app calls Roboflow's hosted object-detection endpoint. Uploaded images and sampled video frames are sent to Roboflow for inference. Video analysis samples at a configurable interval and caps requests at 80 frames per upload; each sampled frame is a separate inference request.
+The hosted image/video path requires an object-detection model trained on images labeled for the exercise and form cues. No training images are stored in this repository; upload your licensed, consented examples to a Roboflow object-detection project. A Roboflow YOLO export will typically have this structure:
 
-## Interpret results carefully
+```text
+exercise-form/
+├── data.yaml
+├── train/
+│   ├── images/    # labeled training photos or extracted video frames
+│   └── labels/    # one YOLO box-label file per image
+├── valid/
+│   ├── images/
+│   └── labels/
+└── test/
+	├── images/
+	└── labels/
+```
 
-`Looks correct` means at least one configured correct-form class cleared the confidence threshold and no configured issue class did. `Needs attention` means a configured issue class cleared it. `Unclear` means neither did. These are model outputs, not guarantees of correct technique. Validate the model with held-out footage before relying on it, and do not use it for injury diagnosis or as a substitute for qualified coaching.
+Use real examples from the camera views your users will use. Include full-body and relevant close views, different participants, clothing, lighting, distances, and exercise phases. Include both accepted form and the specific issues you want to flag. Choose a consistent annotation policy: for whole-person classes, box the person; for issue-specific classes, box the relevant body region. Example labels are `correct_form`, `knees_caving`, and `back_rounding`.
+
+Avoid near-duplicate frames across training, validation, and test sets. Split by participant or source video/session so a model is evaluated on people and recordings it did not train on. In Roboflow, create the dataset version, train an object-detection model, and deploy it. Enter that deployed model ID in the app. In **Class mapping**, list accepted-form labels under **Correct-form classes** and fault labels under **Needs-attention classes**. An issue-class detection takes priority if both kinds appear in the same frame.
+
+## Notebook training data
+
+[workout_form_live.ipynb](workout_form_live.ipynb) is a separate local pose-estimation experiment. It reads UI-PRMD 3D skeleton coordinate sequences, not training photographs, and requires the dataset to be downloaded separately. If its archive does not provide explicit correct/incorrect labels, add `data/UI-PRMD/labels.csv` with `file,label,subject_id`; the notebook refuses to infer correctness from exercise names. Follow the dataset's current access and use terms.
+
+The notebook's live and YouTube checks use a locally trained frame-level classifier and a correct-pose reference. That experiment is separate from the Roboflow-hosted detector used by the app's image/video modes.
+
+## Limitations
+
+Roboflow verdicts depend on your dataset, annotations, model version, and confidence threshold. Webcam cues use simple 2D geometry and can be wrong when landmarks are occluded or the view is angled. Video mode counts sampled frame predictions; it does not understand full movement timing or count repetitions. Validate with held-out people and footage before use. Do not use this prototype for injury diagnosis or as a replacement for qualified coaching.
